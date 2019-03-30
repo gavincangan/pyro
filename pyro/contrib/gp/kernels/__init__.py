@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 from pyro.contrib.gp.kernels.brownian import Brownian
+from pyro.contrib.gp.kernels.gibbs import Gibbs
 from pyro.contrib.gp.kernels.coregionalize import Coregionalize
 from pyro.contrib.gp.kernels.dot_product import DotProduct, Linear, Polynomial
 from pyro.contrib.gp.kernels.isotropic import (RBF, Exponential, Isotropy, Matern32, Matern52,
@@ -20,6 +21,7 @@ __all__ = [
     "DotProduct",
     "Exponent",
     "Exponential",
+    "Gibbs",
     "Isotropy",
     "Linear",
     "Matern32",
