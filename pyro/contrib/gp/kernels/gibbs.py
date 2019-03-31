@@ -16,11 +16,31 @@ def _torch_sqrt(x, eps=1e-12):
 
 
 class Gibbs(Kernel):
-    """
-    :param function lengthscale_fn: Function to compute length scale for each dimension
-    :param function ls_args: Extra args to be passed to `lengthscale` function
+    r"""
+    Gibbs' covariance function is given by
+
+    K( \vec{x}, \vec{x'} ) = \prod \limits_{d=1}^{D}
+        \Big( \frac{2l_d(x)l_d(x')}{l_d(x)^2 + l_d(x')^2} \Big)^{\frac{1}{2}}) 
+        exp{ \Big( -\sum \limits_{d=1}^{D} \frac{(x_d - x_d')^2}{l_d(x)^2 + l_d(x')^2} \Big) } $
+        where $\vec{x} \in \mathbf{D}$ and $l_d$ is the variable length-scale function
+        corresponding to the $d^{th}$ dimension
+
+    Gibbs' kernel represents a modified version of the RBF kernel where
+    length-scales can be variable and are represented as a function of the input x.
+    
+    Reference:
+
+    [1] Williams, C.K. and Rasmussen, C.E., 2006.
+        `Gaussian processes for machine learning` (Vol. 2, No. 3, p. 4).
+        Cambridge, MA: MIT Press.
+        page: 93
     """
     def __init__(self, input_dim, lengthscale_fn, args=None, active_dims=None):
+        """
+        :param function lengthscale_fn: Function to compute length scale for each dimension
+        :param function ls_args: Extra args to be passed to `lengthscale` function
+        """
+
         super(Gibbs, self).__init__(input_dim, active_dims)
         self.lengthscale_fn = _handle_args(lengthscale_fn, args)
         self.args = args
@@ -28,7 +48,7 @@ class Gibbs(Kernel):
 
     def _square_dist(self, X, Z=None):
         r"""
-        Returns :math:`\|\frac{X-Z}{l}\|^2`.
+        Returns :math:`|X-Z|^2`.
         """
         if Z is None:
             Z = X
@@ -42,12 +62,6 @@ class Gibbs(Kernel):
         XZ = X.matmul(Z.t())
         r2 = X2 - 2 * XZ + Z2.t()
         return r2.clamp(min=0)
-
-    def _diag(self, X):
-        """
-        Calculates the diagonal part of covariance matrix on active features.
-        """
-        return self.variance.expand(X.size(0))
 
     def forward(self, X, Z=None, diag=False):
         dim = len(self.active_dims)
