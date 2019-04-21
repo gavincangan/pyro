@@ -10,10 +10,11 @@ import torch
 import pyro
 import pyro.distributions as dist
 import pyro.poutine as poutine
-from pyro.infer import (SVI, Trace_ELBO, TraceEnum_ELBO, TraceGraph_ELBO, TraceMeanField_ELBO,
-                        TraceTailAdaptive_ELBO, config_enumerate)
-from pyro.optim import Adam
 from pyro.distributions.testing import fakes
+from pyro.infer import (SVI, Trace_ELBO, TraceEnum_ELBO, TraceGraph_ELBO, TraceMeanField_ELBO, TraceTailAdaptive_ELBO,
+                        config_enumerate)
+from pyro.ops.indexing import Vindex
+from pyro.optim import Adam
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,62 @@ def test_plate_ok(subsample_size, Elbo):
         guide = config_enumerate(guide)
 
     assert_ok(model, guide, Elbo())
+
+
+@pytest.mark.parametrize("subsample_size", [None, 5], ids=["full", "subsample"])
+@pytest.mark.parametrize("Elbo", [Trace_ELBO, TraceGraph_ELBO, TraceEnum_ELBO])
+def test_plate_subsample_param_ok(subsample_size, Elbo):
+
+    def model():
+        p = torch.tensor(0.5)
+        with pyro.plate("plate", 10, subsample_size):
+            pyro.sample("x", dist.Bernoulli(p))
+
+    def guide():
+        with pyro.plate("plate", 10, subsample_size) as ind:
+            p0 = pyro.param("p0", torch.tensor(0.), event_dim=0)
+            assert p0.shape == ()
+            p = pyro.param("p", 0.5 * torch.ones(10), event_dim=0)
+            assert len(p) == len(ind)
+            pyro.sample("x", dist.Bernoulli(p))
+
+    if Elbo is TraceEnum_ELBO:
+        guide = config_enumerate(guide)
+
+    assert_ok(model, guide, Elbo())
+
+
+@pytest.mark.parametrize("subsample_size", [None, 5], ids=["full", "subsample"])
+@pytest.mark.parametrize("Elbo", [Trace_ELBO, TraceGraph_ELBO, TraceEnum_ELBO])
+@pytest.mark.parametrize("shape,ok", [
+    ((), True),
+    ((1,), True),
+    ((10,), True),
+    ((3, 1), True),
+    ((3, 10), True),
+    ((5), False),
+    ((3, 5), False),
+])
+def test_plate_param_size_mismatch_error(subsample_size, Elbo, shape, ok):
+
+    def model():
+        p = torch.tensor(0.5)
+        with pyro.plate("plate", 10, subsample_size):
+            pyro.sample("x", dist.Bernoulli(p))
+
+    def guide():
+        with pyro.plate("plate", 10, subsample_size):
+            pyro.param("p0", torch.ones(shape), event_dim=0)
+            p = pyro.param("p", torch.ones(10), event_dim=0)
+            pyro.sample("x", dist.Bernoulli(p))
+
+    if Elbo is TraceEnum_ELBO:
+        guide = config_enumerate(guide)
+
+    if ok:
+        assert_ok(model, guide, Elbo())
+    else:
+        assert_error(model, guide, Elbo(), match="invalid shape of pyro.param")
 
 
 @pytest.mark.parametrize("Elbo", [Trace_ELBO, TraceGraph_ELBO, TraceEnum_ELBO])
@@ -476,6 +533,34 @@ def test_nested_plate_plate_dim_error_4(Elbo):
 
     guide = config_enumerate(model) if Elbo is TraceEnum_ELBO else model
     assert_error(model, guide, Elbo(), match='hape mismatch inside plate')
+
+
+@pytest.mark.parametrize("Elbo", [Trace_ELBO, TraceGraph_ELBO, TraceEnum_ELBO])
+def test_nested_plate_plate_subsample_param_ok(Elbo):
+
+    def model():
+        with pyro.plate("plate_outer", 10, 5):
+            pyro.sample("x", dist.Bernoulli(0.2))
+            with pyro.plate("plate_inner", 11, 6):
+                pyro.sample("y", dist.Bernoulli(0.2))
+
+    def guide():
+        p0 = pyro.param("p0", 0.5 * torch.ones(4, 5), event_dim=2)
+        assert p0.shape == (4, 5)
+        with pyro.plate("plate_outer", 10, 5):
+            p1 = pyro.param("p1", 0.5 * torch.ones(10, 3), event_dim=1)
+            assert p1.shape == (5, 3)
+            px = pyro.param("px", 0.5 * torch.ones(10), event_dim=0)
+            assert px.shape == (5,)
+            pyro.sample("x", dist.Bernoulli(px))
+            with pyro.plate("plate_inner", 11, 6):
+                py = pyro.param("py", 0.5 * torch.ones(11, 10), event_dim=0)
+                assert py.shape == (6, 5)
+                pyro.sample("y", dist.Bernoulli(py))
+
+    if Elbo is TraceEnum_ELBO:
+        guide = config_enumerate(guide)
+    assert_ok(model, guide, Elbo())
 
 
 @pytest.mark.parametrize("Elbo", [Trace_ELBO, TraceGraph_ELBO, TraceEnum_ELBO])
@@ -1143,7 +1228,8 @@ def test_enum_in_model_multi_scale_error():
                  match='Expected all enumerated sample sites to share a common poutine.scale')
 
 
-def test_enum_in_model_diamond_error():
+@pytest.mark.parametrize('use_vindex', [False, True])
+def test_enum_in_model_diamond_error(use_vindex):
     data = torch.tensor([[0, 1], [0, 0]])
 
     @config_enumerate
@@ -1159,16 +1245,18 @@ def test_enum_in_model_diamond_error():
         probs_d = pyro.param("probs_d")
         b_axis = pyro.plate("b_axis", 2, dim=-1)
         c_axis = pyro.plate("c_axis", 2, dim=-2)
-        d_ind = torch.arange(2, dtype=torch.long)
         a = pyro.sample("a", dist.Categorical(probs_a))
         with b_axis:
             b = pyro.sample("b", dist.Categorical(probs_b[a]))
         with c_axis:
             c = pyro.sample("c", dist.Categorical(probs_c[a]))
         with b_axis, c_axis:
-            pyro.sample("d",
-                        dist.Categorical(probs_d[b.unsqueeze(-1), c.unsqueeze(-1), d_ind]),
-                        obs=data)
+            if use_vindex:
+                probs = Vindex(probs_d)[b, c]
+            else:
+                d_ind = torch.arange(2, dtype=torch.long)
+                probs = probs_d[b.unsqueeze(-1), c.unsqueeze(-1), d_ind]
+            pyro.sample("d", dist.Categorical(probs), obs=data)
 
     def guide():
         pass
@@ -1301,8 +1389,9 @@ def test_enum_recycling_chain():
     assert_ok(model, guide, TraceEnum_ELBO(max_plate_nesting=0))
 
 
+@pytest.mark.parametrize('use_vindex', [False, True])
 @pytest.mark.parametrize('markov', [False, True])
-def test_enum_recycling_dbn(markov):
+def test_enum_recycling_dbn(markov, use_vindex):
     #    x --> x --> x  enum "state"
     # y  |  y  |  y  |  enum "occlusion"
     #  \ |   \ |   \ |
@@ -1313,15 +1402,18 @@ def test_enum_recycling_dbn(markov):
         p = pyro.param("p", torch.ones(3, 3))
         q = pyro.param("q", torch.ones(2))
         r = pyro.param("r", torch.ones(3, 2, 4))
-        z_ind = torch.arange(4, dtype=torch.long)
 
         x = 0
         times = pyro.markov(range(100)) if markov else range(11)
         for t in times:
             x = pyro.sample("x_{}".format(t), dist.Categorical(p[x]))
             y = pyro.sample("y_{}".format(t), dist.Categorical(q))
-            pyro.sample("z_{}".format(t),
-                        dist.Categorical(r[x.unsqueeze(-1), y.unsqueeze(-1), z_ind]),
+            if use_vindex:
+                probs = Vindex(r)[x, y]
+            else:
+                z_ind = torch.arange(4, dtype=torch.long)
+                probs = r[x.unsqueeze(-1), y.unsqueeze(-1), z_ind]
+            pyro.sample("z_{}".format(t), dist.Categorical(probs),
                         obs=torch.tensor(0.))
 
     def guide():
@@ -1374,7 +1466,8 @@ def test_enum_recycling_nested():
     assert_ok(model, guide, TraceEnum_ELBO(max_plate_nesting=0))
 
 
-def test_enum_recycling_grid():
+@pytest.mark.parametrize('use_vindex', [False, True])
+def test_enum_recycling_grid(use_vindex):
     #  x---x---x---x    -----> i
     #  |   |   |   |   |
     #  x---x---x---x   |
@@ -1386,14 +1479,18 @@ def test_enum_recycling_grid():
     @config_enumerate
     def model():
         p = pyro.param("p_leaf", torch.ones(2, 2, 2))
-        ind = torch.arange(2, dtype=torch.long)
         x = defaultdict(lambda: torch.tensor(0))
         y_axis = pyro.markov(range(4), keep=True)
         for i in pyro.markov(range(4)):
             for j in y_axis:
+                if use_vindex:
+                    probs = Vindex(p)[x[i - 1, j], x[i, j - 1]]
+                else:
+                    ind = torch.arange(2, dtype=torch.long)
+                    probs = p[x[i - 1, j].unsqueeze(-1),
+                              x[i, j - 1].unsqueeze(-1), ind]
                 x[i, j] = pyro.sample("x_{}_{}".format(i, j),
-                                      dist.Categorical(p[x[i - 1, j].unsqueeze(-1),
-                                                         x[i, j - 1].unsqueeze(-1), ind]))
+                                      dist.Categorical(probs))
 
     def guide():
         pass
