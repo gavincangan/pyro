@@ -3,6 +3,7 @@ from __future__ import absolute_import, division, print_function
 import numbers
 
 import torch
+import math
 
 
 def _compute_chain_variance_stats(input):
@@ -342,3 +343,52 @@ def waic(input, log_weights=None, pointwise=False, dim=0):
     elpd = lpd - p_waic
     waic = -2 * elpd
     return (waic, p_waic) if pointwise else (waic.sum(), p_waic.sum())
+
+
+def fit_generalized_pareto(X):
+    """
+    Given a dataset X assumed to be drawn from the Generalized Pareto
+    Distribution, estimate the distributional parameters k, sigma using a
+    variant of the technique described in reference [1], as described in
+    reference [2].
+
+    References
+    [1] 'A new and efficient estimation method for the generalized Pareto distribution.'
+    Zhang, J. and Stephens, M.A. (2009).
+    [2] 'Pareto Smoothed Importance Sampling.'
+    Aki Vehtari, Andrew Gelman, Jonah Gabry
+
+    :param torch.Tensor: the input data X
+    :returns tuple: tuple of floats (k, sigma) corresponding to the fit parameters
+    """
+    if not isinstance(X, torch.Tensor) or X.dim() != 1:
+        raise ValueError("Input X must be a 1-dimensional torch tensor")
+
+    X = X.cpu().double()
+    X = torch.sort(X, descending=False)[0]
+
+    N = X.size(0)
+    M = 30 + int(math.sqrt(N))
+
+    # b = k / sigma
+    bs = 1.0 - math.sqrt(M) / (torch.arange(1, M + 1).double() - 0.5).sqrt()
+    bs /= 3.0 * X[int(N/4 - 0.5)]
+    bs += 1 / X[-1]
+
+    ks = torch.log1p(-bs.unsqueeze(-1) * X).mean(-1)
+    Ls = N * (torch.log(-bs / ks) - (ks + 1.0))
+
+    weights = torch.exp(Ls - Ls.unsqueeze(-1))
+    weights = 1.0 / weights.sum(-1)
+
+    not_small_weights = weights > 1.0e-30
+    weights = weights[not_small_weights]
+    bs = bs[not_small_weights]
+    weights /= weights.sum()
+
+    b = (bs * weights).sum().item()
+    k = torch.log1p(-b * X).mean().item()
+    sigma = -k / b
+    k = k * N / (N + 10.0) + 5.0 / (N + 10.0)
+
+    return k, sigma
