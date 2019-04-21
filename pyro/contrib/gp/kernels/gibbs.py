@@ -5,6 +5,7 @@ from torch.distributions import constraints
 from torch.nn import Parameter
 
 from .kernel import Kernel
+import pdb
 
 def _torch_sqrt(x, eps=1e-12):
     """
@@ -63,10 +64,12 @@ class Gibbs(Kernel):
 
         rX2 = (rX**2).reshape(-1, 1, dim)
         rZ2 = (rZ**2).reshape(1, -1, dim)
-        rX2_plus_rZ2 = torch.sum(rX2 + rZ2, dim=-1)
+        rX2_plus_rZ2 = rX2 + rZ2
+        rX2_plus_rZ2_mul = torch.prod(rX2_plus_rZ2, dim=-1)
 
-        return ( _torch_sqrt( torch.pow( (2.0 * rX.matmul(rZ.t())) / rX2_plus_rZ2, dim ) ) \
-            * torch.exp( -1.0 * r2 / rX2_plus_rZ2 ) )
+        pdb.set_trace()
+        return ( _torch_sqrt( torch.pow( (2.0 * rX.matmul(rZ.t())) / rX2_plus_rZ2_mul, dim ) ) \
+            * torch.exp( -1.0 * torch.sum(r2 / rX2_plus_rZ2, dim=-1) ) )
 
 def _handle_args(func, args):
     def f(x, args):
